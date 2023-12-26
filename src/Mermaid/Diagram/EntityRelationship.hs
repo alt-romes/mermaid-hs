@@ -1,13 +1,19 @@
 {-# LANGUAGE OverloadedStrings, GADTs, DataKinds, PolyKinds #-}
+  {-# OPTIONS_GHC -Wno-name-shadowing #-}
 module Mermaid.Diagram.EntityRelationship
   ( -- * Entity relation diagram
     parseERDiagram
     -- * Entity relations
+  , EntityRelationDiagram(..)
   , Entity
+  , EntityAttributes(..), AttributeType(..)
   , EntityRelation(..)
   , Relationship(..)
   , Cardinality(..)
   , Identification(..)
+
+    -- * Utils
+  , Maybe'(..)
   ) where
 
 import Data.Functor.Identity
@@ -16,6 +22,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Text.Megaparsec
 import Text.Megaparsec.Char
+import qualified Text.Megaparsec.Char.Lexer as L
 import Data.Either
 import Control.Monad.Except
 
@@ -29,19 +36,20 @@ data EntityRelationDiagram = ERDiagram
   { entityAttributes :: [EntityAttributes]
   , entityRelations :: [EntityRelation]
   }
-  deriving Show
+  deriving (Show, Eq)
 
 data EntityAttributes = EntityAttributes
   { entity :: Entity
   , nameAlias :: Maybe Text
   , typeNames :: [(AttributeType, Text)]
   }
-  deriving Show
+  deriving (Show, Eq)
 
 data AttributeType
   = ATString
   | ATInt
-  deriving Show
+  | ATFloat
+  deriving (Show, Eq)
 
 type Entity = Text
 
@@ -56,25 +64,38 @@ data EntityRelation = forall exists. ER
   , relationshipLabel :: Maybe' exists Text
   }
 deriving instance Show EntityRelation
+instance Eq EntityRelation where
+  ER first' rel second' label == ER first'' rel' second'' label'
+    = first' == first''
+    && case (rel, rel') of
+         (Just' rel, Just' rel')
+           -> rel == rel'
+            && case (second', second'') of
+                 (Just' second', Just' second'')
+                   -> second' == second''
+                    && case (label, label') of
+                         (Just' label, Just' label') -> label == label'
+         (_, _) -> False
+
 
 data Relationship = Relationship
   { leftCardinality :: Cardinality
   , identification :: Identification
   , rightCardinality :: Cardinality
   }
-  deriving Show
+  deriving (Show, Eq)
 
 data Cardinality
   = ZeroOrOne
   | ExactlyOne
   | ZeroOrMore
   | OneOrMore
-  deriving Show
+  deriving (Show, Eq)
 
 data Identification
   = Identifying
   | NonIdentifying
-  deriving Show
+  deriving (Show, Eq)
 
 --------------------------------------------------------------------------------
 -- * Parser
@@ -84,9 +105,14 @@ type Parser = ParsecT Void Text Identity
 
 pERDiagram :: Parser EntityRelationDiagram
 pERDiagram = do
-  _ <- string "erDigram" <* spaces
+  _ <- string "erDiagram" <* spaces
   (entityAttributes, entityRelations) <-
-    partitionEithers <$> many (choice [Left <$> try pEntityAttributes, Right <$> pEntityRelation])
+    partitionEithers <$>
+      many (choice
+        [ Left <$> try pEntityAttributes
+        , Right <$> pEntityRelation
+        ]
+           )
   return ERDiagram{entityAttributes, entityRelations}
 
 pEntityAttributes :: Parser EntityAttributes
@@ -106,6 +132,7 @@ pAttributeType =
   choice
   [ ATString <$ string "string"
   , ATInt <$ string "int"
+  , ATFloat <$ string "float"
   ]
 
 pEntity :: Parser Entity
@@ -122,7 +149,7 @@ pEntityRelation = do
     <$> pRelationship <* spaces
     <*> pEntity <* spaces
     <* char ':' <* spaces
-    <*> pLabel
+    <*> pLabel  <* spaces
   case hasRelationship of
     Nothing -> return
       ER{ firstEntity
@@ -151,26 +178,25 @@ pCardinality flipped =
   , OneOrMore  <$ pOneOrMore
   ] where
     pZeroOrOne
-      =   try (string (flip' "|o"))
+      =   try (string (if flipped then "o|" else "|o"))
       <|> string "one or zero"
       <|> string "zero or one"
     pExactlyOne
-      =   string (flip' "||")
+      =   string "||"
       <|> string "one or more"
       <|> string "one or many"
       <|> string "many(1)"
       <|> string "1+"
     pZeroOrMore
-      =   string (flip' "}o")
+      =   string (if flipped then "o{" else "}o")
       <|> string "zero or more"
       <|> string "zero or many"
       <|> string "many(0)"
       <|> string "0+"
     pOneOrMore
-      =   string (flip' "}|")
+      =   string (if flipped then "|{" else "}|")
       <|> string "only one"
       <|> string "1"
-    flip' = if flipped then T.reverse else id
 
 pIdentification :: Parser Identification
 pIdentification =
@@ -186,7 +212,7 @@ pIdentification =
       <|> string "optionally to"
 
 pLabel :: Parser Text
-pLabel = stringLiteral <|> (T.pack <$> many alphaNumChar)
+pLabel = try stringLiteral <|> (T.pack <$> manyTill alphaNumChar newline)
 
 --------------------------------------------------------------------------------
 -- * Parse Utils
@@ -195,8 +221,12 @@ pLabel = stringLiteral <|> (T.pack <$> many alphaNumChar)
 stringLiteral :: Parser Text
 stringLiteral = T.pack <$> (char '\"' *> manyTill anySingle (char '\"'))
 
+-- space consumer
 spaces :: Parser ()
-spaces = skipMany space
+spaces = L.space
+  space1
+  empty -- (L.skipLineComment "//")
+  empty
 
 --------------------------------------------------------------------------------
 -- * Type Utils
@@ -210,4 +240,5 @@ data Maybe' exists a where
   Just'    :: a -> Maybe' 'True a
 
 deriving instance Show a => Show (Maybe' exists a)
+deriving instance Eq a => Eq (Maybe' exists a)
 
